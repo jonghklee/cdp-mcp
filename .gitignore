@@ -1,0 +1,18 @@
+node_modules/
+dist/
+data/
+.env
+*.db
+baselines/**/*.png
+!baselines/.gitkeep
+.claude/
+*.tsbuildinfo
+
+# Local MCP config — contains absolute machine paths. Copy from .mcp.json.example
+.mcp.json
+
+# Product-specific extension bridges (proprietary, not part of the open-source core)
+products/
+
+# macOS
+.DS_Store
