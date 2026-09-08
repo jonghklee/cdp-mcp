@@ -164,6 +164,19 @@ export class TabManager {
     logger.info(`Tab activated (foreground): ${tabId}`);
   }
 
+  async minimizeWindow(tabId: string): Promise<void> {
+    const browserClient = this.pool.getBrowserClient();
+    const { windowId } = await browserClient.send<{ windowId: number }>(
+      'Browser.getWindowForTarget',
+      { targetId: tabId },
+    );
+    await browserClient.send('Browser.setWindowBounds', {
+      windowId,
+      bounds: { windowState: 'minimized' },
+    });
+    logger.info(`Window minimized for tab ${tabId}`);
+  }
+
   async closeTab(tabId: string): Promise<void> {
     const browserClient = this.pool.getBrowserClient();
     await browserClient.send('Target.closeTarget', { targetId: tabId });

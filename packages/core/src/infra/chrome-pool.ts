@@ -1,10 +1,10 @@
-import { spawn, execSync, type ChildProcess } from 'child_process';
+import { spawn, spawnSync, execSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { CdpConnectionError, createLogger, sleep } from '@cdp-mcp/shared';
 import { PortManager } from './port-manager.js';
-import { acquireLock, releaseLock, isMyLock, readLock } from './port-store.js';
+import { acquireLock, releaseLock, isMyLock, readLock, isPortLocked } from './port-store.js';
 
 const logger = createLogger('chrome-manager');
 
@@ -17,6 +17,64 @@ const DEFAULT_CHROME_PROFILES: Record<string, string> = {
 
 /** CDP-MCP 전용 Chrome 프로필 디렉토리 */
 const CDP_MCP_PROFILES_DIR = path.join(os.homedir(), '.cdp-mcp', 'chrome-profiles');
+
+/** 프로파일 정리 시 이 시간 이내에 만들어진 디렉토리는 보존 (launch 경합 보호) */
+const PROFILE_CLEANUP_GRACE_MS = 10 * 60 * 1000;
+
+/** 해당 user-data-dir를 쓰는 Chrome 메인 프로세스 PID 조회 (helper 프로세스 제외) */
+function findChromeMainPid(userDataDir: string): number | null {
+  try {
+    const out = execSync(
+      `ps ax -o pid=,command= | grep -F -- "--user-data-dir=${userDataDir}" | grep -v grep | grep -v -- "--type="`,
+      { encoding: 'utf-8' },
+    ).trim().split('\n')[0] ?? '';
+    const pid = parseInt(out.trim().split(/\s+/)[0], 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 해당 user-data-dir로 실행 중인 Chrome 프로세스가 있는지 확인 */
+function isProfileDirInUse(userDataDir: string): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    execSync(`pgrep -f -- "--user-data-dir=${userDataDir}"`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 사용 중이 아닌 옛 CDP 프로파일 디렉토리를 삭제.
+ * 보호 조건: 실행 중인 Chrome이 쓰는 디렉토리, 살아있는 세션의 lock이 걸린 포트,
+ * grace 기간(10분) 이내에 만들어진 디렉토리, excludePort(지금 launch 중인 포트).
+ */
+export async function cleanupStaleProfiles(excludePort?: number): Promise<number> {
+  let cleaned = 0;
+  try {
+    if (!fs.existsSync(CDP_MCP_PROFILES_DIR)) return 0;
+    for (const entry of fs.readdirSync(CDP_MCP_PROFILES_DIR)) {
+      const m = /^port-(\d+)$/.exec(entry);
+      if (!m) continue;
+      const port = parseInt(m[1], 10);
+      if (port === excludePort) continue;
+
+      const dir = path.join(CDP_MCP_PROFILES_DIR, entry);
+      if (isProfileDirInUse(dir)) continue;
+      if (isPortLocked(port).locked) continue;
+      if (Date.now() - fs.statSync(dir).mtimeMs < PROFILE_CLEANUP_GRACE_MS) continue;
+
+      await fs.promises.rm(dir, { recursive: true, force: true });
+      cleaned++;
+      logger.info(`Cleaned stale profile: ${entry}`);
+    }
+  } catch (error) {
+    logger.error(`Error during stale profile cleanup: ${error}`);
+  }
+  return cleaned;
+}
 
 /**
  * 기존 Chrome 프로필에서 주요 파일을 복제 (로그인, 쿠키, 익스텐션 설정 유지)
@@ -188,22 +246,24 @@ export class ChromeManager {
     const userDataDir = options?.userDataDir ?? path.join(CDP_MCP_PROFILES_DIR, `port-${port}`);
     const profileDir = path.join(userDataDir, 'Default');
 
-    if (!fs.existsSync(userDataDir)) {
-      fs.mkdirSync(userDataDir, { recursive: true });
+    // 매 launch마다 실제 Chrome 프로필에서 새로 복제 (최신 로그인/계정/기록 반영).
+    // 단, 이 디렉토리를 쓰는 Chrome이 이미 떠 있으면 삭제하지 않고 그대로 재사용.
+    const dirInUse = isProfileDirInUse(userDataDir);
+    if (!dirInUse && fs.existsSync(userDataDir)) {
+      fs.rmSync(userDataDir, { recursive: true, force: true });
+      logger.info(`Wiped stale profile for fresh copy: ${userDataDir}`);
     }
-    if (!fs.existsSync(profileDir)) {
-      fs.mkdirSync(profileDir, { recursive: true });
-    }
+    fs.mkdirSync(profileDir, { recursive: true });
 
-    // 기존 Chrome 프로필에서 복제 (로그인, 쿠키, 익스텐션 유지)
-    const sourceProfile = DEFAULT_CHROME_PROFILES[process.platform];
-    if (sourceProfile && fs.existsSync(sourceProfile)) {
-      copyProfile(sourceProfile, profileDir);
-    } else {
-      logger.warn(`Source profile not found: ${sourceProfile}`);
+    if (!dirInUse) {
+      const sourceProfile = DEFAULT_CHROME_PROFILES[process.platform];
+      if (sourceProfile && fs.existsSync(sourceProfile)) {
+        copyProfile(sourceProfile, profileDir);
+      } else {
+        logger.warn(`Source profile not found: ${sourceProfile}`);
+      }
+      ensureDeveloperMode(profileDir);
     }
-
-    ensureDeveloperMode(profileDir);
 
     // 익스텐션 경로: 옵션 > 환경변수 > 없음
     const extensionPaths = resolveExtensionPaths(options?.extensionPaths);
@@ -224,33 +284,32 @@ export class ChromeManager {
 
     logger.info(`Launching Chrome: ${chromePath} with port ${port}`);
 
-    // macOS: 포커스 유지가 필요하면 현재 최전면 앱을 기록
-    let previousApp: string | null = null;
-    if (!focusOnLaunch && process.platform === 'darwin') {
-      try {
-        previousApp = execSync(
-          'osascript -e \'tell application "System Events" to get name of first application process whose frontmost is true\'',
-          { encoding: 'utf-8' },
-        ).trim();
-        logger.debug(`Current frontmost app: ${previousApp}`);
-      } catch {
-        logger.debug('Failed to get frontmost app');
+    if (process.platform === 'darwin') {
+      // macOS: 바이너리를 직접 spawn하면 LaunchServices가 앱을 무조건 최전면으로
+      // 올려서 "올라왔다 내려가는" 포커스 깜빡임이 생긴다.
+      // `open -g`는 활성화 없이(포커스 안 뺏고) 창을 뒤쪽에 띄우므로
+      // 이전 앱으로 포커스를 되돌리는 osascript 트릭이 아예 필요 없다.
+      const appBundle = chromePath.replace(/\/Contents\/MacOS\/.*$/, '');
+      const openArgs = ['-n', ...(focusOnLaunch ? [] : ['-g']), '-a', appBundle, '--args', ...args];
+      const result = spawnSync('open', openArgs, { stdio: 'ignore' });
+      if (result.status !== 0) {
+        throw new CdpConnectionError(`Failed to launch Chrome via open (exit ${result.status})`);
       }
+    } else {
+      this.process = spawn(chromePath, args, {
+        stdio: 'ignore',
+        detached: true,
+      });
+
+      // Chrome이 MCP 재시작에도 살아남도록 unref
+      this.process.unref();
+      this.chromePid = this.process.pid ?? null;
+
+      this.process.on('exit', (code) => {
+        logger.info(`Chrome exited with code ${code}`);
+        this.process = null;
+      });
     }
-
-    this.process = spawn(chromePath, args, {
-      stdio: 'ignore',
-      detached: true,
-    });
-
-    // Chrome이 MCP 재시작에도 살아남도록 unref
-    this.process.unref();
-    this.chromePid = this.process.pid ?? null;
-
-    this.process.on('exit', (code) => {
-      logger.info(`Chrome exited with code ${code}`);
-      this.process = null;
-    });
 
     this.port = port;
 
@@ -258,17 +317,9 @@ export class ChromeManager {
     const wsUrl = await this.waitForDebugEndpoint(port);
     this.wsUrl = wsUrl;
 
-    // macOS: Chrome이 뜬 뒤 원래 앱으로 포커스 복귀
-    if (previousApp) {
-      try {
-        execSync(
-          `osascript -e 'tell application "${previousApp}" to activate'`,
-          { stdio: 'ignore' },
-        );
-        logger.debug(`Focus restored to ${previousApp}`);
-      } catch {
-        logger.debug(`Failed to restore focus to ${previousApp}`);
-      }
+    // macOS: open 경유 실행은 child PID를 못 받으므로 프로세스 목록에서 역추적
+    if (process.platform === 'darwin') {
+      this.chromePid = findChromeMainPid(userDataDir);
     }
 
     // Acquire lock after successful launch (chromePid 포함)
@@ -276,6 +327,9 @@ export class ChromeManager {
     acquireLock(port, this.sessionId, `cdp-mcp-${port}`, this.chromePid ?? undefined);
 
     this.registerCleanupHandlers();
+
+    // 병렬 정리: 아무도 안 쓰는 옛 프로파일을 백그라운드에서 삭제 (launch를 막지 않음)
+    void cleanupStaleProfiles(port);
 
     return { port, wsUrl };
   }

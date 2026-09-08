@@ -134,6 +134,39 @@ export function registerTabTools(
     }
   );
 
+  // cdp_hide_chrome
+  server.tool(
+    'cdp_hide_chrome',
+    `Chrome 창을 Dock으로 최소화하여 화면에서 치웁니다. cdp_focus_chrome의 반대 동작.
+
+사용 시점:
+- 자동화 중 Chrome 창이 사용자의 화면을 가리지 않게 할 때
+- 사용자가 "크롬 숨겨/치워"라고 요청할 때
+
+주의:
+- 최소화 상태에서도 스크린샷·클릭·입력 등 모든 자동화는 정상 동작합니다 (viewport 자동 보정)
+- 다시 표시하려면 cdp_focus_chrome을 호출하세요
+
+반환 값:
+- hidden: 성공 여부
+- tabId: 최소화된 창의 탭 ID`,
+    {
+      tabId: z.string().optional().describe('최소화할 창의 탭 ID (미지정 시 현재 활성 탭의 창)'),
+    },
+    async ({ tabId }) => {
+      const { tabManager } = await lazy.ensure();
+      let targetTabId = tabId;
+      if (!targetTabId) {
+        const active = await tabManager.getActiveTab();
+        targetTabId = active.id;
+      }
+      await tabManager.minimizeWindow(targetTabId);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ hidden: true, tabId: targetTabId }) }],
+      };
+    }
+  );
+
   // cdp_close_tab
   server.tool(
     'cdp_close_tab',
