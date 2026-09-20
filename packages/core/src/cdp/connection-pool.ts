@@ -90,9 +90,10 @@ export class ConnectionPool extends EventEmitter {
     await client.connect();
     const session = new CdpSession(client);
 
-    // Page 타겟이면 dialog auto-dismiss 설정
+    // Page 타겟이면 dialog auto-dismiss 설정 + 백그라운드 스로틀 해제
     if (targetInfo.type === 'page') {
       await this.enableDialogAutoDismiss(session);
+      await this.keepAwakeWithoutFocus(session);
     }
 
     this.connections.set(targetId, session);
@@ -218,6 +219,17 @@ export class ConnectionPool extends EventEmitter {
       this.browserClient = null;
     }
     logger.info('All connections closed');
+  }
+
+  /**
+   * 창을 앞으로 올리지 않고도 백그라운드 탭을 깨어 있게 한다.
+   * 가려진 탭은 크롬이 타이머·rAF를 멈추고 페이지를 hidden으로 취급해서,
+   * Figma 같은 앱은 내부 브리지가 잠들어 비동기 호출이 무한 대기한다.
+   * 포커스 에뮬레이션 + lifecycle 'active' 로 OS 창 순서는 그대로 둔 채 이를 막는다.
+   */
+  private async keepAwakeWithoutFocus(session: CdpSession): Promise<void> {
+    try { await session.send('Emulation.setFocusEmulationEnabled', { enabled: true }); } catch { /* 구버전 크롬 */ }
+    try { await session.send('Page.setWebLifecycleState', { state: 'active' }); } catch { /* 이미 active */ }
   }
 
   /**

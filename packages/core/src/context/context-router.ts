@@ -55,6 +55,9 @@ export class ContextRouter {
     awaitPromise: boolean
   ): Promise<EvaluationResult> {
     const client = await this.pool.getActiveTab();
+    // 실행 직전에 다시 깨운다 — 창을 올리지 않고 백그라운드 탭의 비동기 작업이 멈추지 않게.
+    try { await client.send('Emulation.setFocusEmulationEnabled', { enabled: true }); } catch { /* noop */ }
+    try { await client.send('Page.setWebLifecycleState', { state: 'active' }); } catch { /* noop */ }
     const result = await client.send<{
       result: { type: string; subtype?: string; value?: unknown };
       exceptionDetails?: Record<string, unknown>;
