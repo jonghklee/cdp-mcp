@@ -1,3 +1,5 @@
+import * as os from 'os';
+import * as path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ConnectionPool } from './cdp/connection-pool.js';
@@ -19,6 +21,7 @@ import { registerIdbTools } from './tools/idb-tools.js';
 import { CdpConnectionError, createLogger } from '@cdp-mcp/shared';
 
 const logger = createLogger('server');
+const DOWNLOAD_DIR = process.env.CDP_MCP_DOWNLOAD_DIR ?? path.join(os.homedir(), 'Downloads');
 
 /**
  * 공유 크롬 연결을 lazy 하게 관리한다. 첫 도구 호출 때 공유 크롬을 쓰기 시작하고(꺼져 있으면 띄움),
@@ -42,6 +45,11 @@ export class LazyConnectionManager {
       const n = await pool.closeWindowById(dead.windowId).catch(() => 0);
       logger.info(`Closed ${n} tab(s) left by exited agent pid ${dead.pid}`);
     }
+
+    // 창 없는 크롬은 내려받기 위치를 정해 주지 않으면 파일을 저장하지 않는다. 평소처럼 ~/Downloads 로 받는다.
+    await pool.getBrowserClient().send('Browser.setDownloadBehavior', {
+      behavior: 'allow', downloadPath: DOWNLOAD_DIR, eventsEnabled: false,
+    }).catch((err) => logger.warn(`setDownloadBehavior failed: ${err}`));
 
     const windowId = await pool.initWindow();
     writeLease({ pid: process.pid, windowId, startedAt: Date.now() });

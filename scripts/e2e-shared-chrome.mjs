@@ -14,7 +14,8 @@ const PORT = Number(process.env.E2E_PORT ?? 9361);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-mcp-e2e-'));
 fs.chmodSync(HOME, 0o700);
 const DATA_DIR = path.join(HOME, 'chrome-profiles', 'shared');
-const env = { ...process.env, CDP_MCP_PORT: String(PORT), CDP_MCP_HOME: HOME };
+const DL = path.join(HOME, 'downloads');
+const env = { ...process.env, CDP_MCP_PORT: String(PORT), CDP_MCP_HOME: HOME, CDP_MCP_DOWNLOAD_DIR: DL };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ' + detail : ''}`); };
@@ -127,6 +128,14 @@ try {
   let blocked = false;
   try { await B.tool('cdp_switch_tab', { tabId: ta.tab.id }); } catch { blocked = true; }
   check('B 는 A 의 탭으로 바꿀 수 없다', blocked);
+
+  const pdfPath = path.join(HOME, 'form.pdf');
+  const pdf = await A.tool('cdp_save_pdf', { path: pdfPath });
+  check('PDF 로 저장된다', fs.existsSync(pdfPath) && fs.readFileSync(pdfPath).subarray(0, 4).toString() === '%PDF', `${pdf.bytes}B`);
+  await A.tool('cdp_navigate', { url: 'data:text/html,<a id=d download="hello.txt" href="data:text/plain,hi">d</a>' });
+  await A.tool('cdp_click', { selector: '#d' });
+  for (let i = 0; i < 30 && !fs.existsSync(path.join(DL, 'hello.txt')); i++) await sleep(200);
+  check('내려받기가 지정 폴더에 저장된다', fs.existsSync(path.join(DL, 'hello.txt')));
 
   const show = await A.tool('cdp_show');
   check('보여주기 주소만 돌려준다', typeof show.viewUrl === 'string' && show.viewUrl.includes(`/devtools/page/${show.tab.id}`));

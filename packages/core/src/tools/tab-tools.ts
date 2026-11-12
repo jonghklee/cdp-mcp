@@ -1,3 +1,6 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { LazyConnectionManager } from '../server.js';
@@ -120,6 +123,36 @@ export function registerTabTools(
       const viewUrl = `http://127.0.0.1:${port}/devtools/inspector.html?ws=127.0.0.1:${port}/devtools/page/${tab.id}`;
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({ tab, viewUrl }) }],
+      };
+    }
+  );
+
+  // cdp_save_pdf
+  server.tool(
+    'cdp_save_pdf',
+    `현재 탭을 PDF 파일로 저장합니다(인쇄 대화상자 없이). 사이트가 «출력/인쇄» 화면을 띄우는 문서(사업자등록증명, 영수증 등)를 파일로 남길 때 씁니다.
+사이트의 «내려받기» 버튼으로 받는 파일은 자동으로 ~/Downloads 에 저장되니 이 도구가 필요 없습니다.
+
+반환 값:
+- path: 저장한 파일 경로
+- bytes: 파일 크기`,
+    {
+      path: z.string().optional().describe('저장할 절대 경로(.pdf). 생략하면 ~/Downloads/<탭 제목>.pdf'),
+      landscape: z.boolean().optional().describe('가로 방향 (기본 false)'),
+    },
+    async ({ path: outPath, landscape }) => {
+      const { pool, tabManager } = await lazy.ensure();
+      const tab = await tabManager.getActiveTab();
+      const session = await pool.getActiveTab();
+      const { data } = await session.send<{ data: string }>('Page.printToPDF', {
+        printBackground: true, landscape: landscape ?? false, preferCSSPageSize: true,
+      });
+      const safeTitle = (tab.title || 'page').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80);
+      const target = outPath ?? path.join(os.homedir(), 'Downloads', `${safeTitle}.pdf`);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, Buffer.from(data, 'base64'));
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ path: target, bytes: fs.statSync(target).size, tab }) }],
       };
     }
   );
