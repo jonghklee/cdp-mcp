@@ -130,22 +130,30 @@ export function registerTabTools(
   // cdp_save_pdf
   server.tool(
     'cdp_save_pdf',
-    `현재 탭을 PDF 파일로 저장합니다(인쇄 대화상자 없이). 사이트가 «출력/인쇄» 화면을 띄우는 문서(사업자등록증명, 영수증 등)를 파일로 남길 때 씁니다.
+    `현재 탭을 PDF 파일로 저장합니다(인쇄 대화상자 없이, 기본 A4). 사이트가 «출력/인쇄» 화면을 띄우는 문서(사업자등록증명, 영수증 등)를 파일로 남길 때 씁니다.
 사이트의 «내려받기» 버튼으로 받는 파일은 자동으로 ~/Downloads 에 저장되니 이 도구가 필요 없습니다.
 
 반환 값:
 - path: 저장한 파일 경로
-- bytes: 파일 크기`,
+- bytes: 파일 크기
+
+주의: 화면을 인쇄하듯 저장하므로, 문서가 작은 뷰어 틀 안에서 스크롤되는 사이트(국세청 문서 뷰어 등)는 잘립니다.
+그럴 때는 cdp_evaluate 로 문서 한 장(SVG/IMG)만 화면에 남긴 뒤 저장하세요.`,
     {
       path: z.string().optional().describe('저장할 절대 경로(.pdf). 생략하면 ~/Downloads/<탭 제목>.pdf'),
       landscape: z.boolean().optional().describe('가로 방향 (기본 false)'),
+      paper: z.enum(['A4', 'Letter']).optional().describe('종이 크기 (기본 A4). 페이지가 CSS 로 크기를 정하면 그쪽이 우선'),
+      margin: z.number().min(0).max(1).optional().describe('여백 인치 (기본 0.4, 증명서처럼 꽉 찬 문서는 0)'),
     },
-    async ({ path: outPath, landscape }) => {
+    async ({ path: outPath, landscape, paper, margin }) => {
       const { pool, tabManager } = await lazy.ensure();
       const tab = await tabManager.getActiveTab();
       const session = await pool.getActiveTab();
+      const size = (paper ?? 'A4') === 'A4' ? { paperWidth: 8.27, paperHeight: 11.69 } : { paperWidth: 8.5, paperHeight: 11 };
+      const m = margin ?? 0.4;
       const { data } = await session.send<{ data: string }>('Page.printToPDF', {
-        printBackground: true, landscape: landscape ?? false, preferCSSPageSize: true,
+        printBackground: true, landscape: landscape ?? false, preferCSSPageSize: true, ...size,
+        marginTop: m, marginBottom: m, marginLeft: m, marginRight: m,
       });
       const safeTitle = (tab.title || 'page').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80);
       const target = outPath ?? path.join(os.homedir(), 'Downloads', `${safeTitle}.pdf`);

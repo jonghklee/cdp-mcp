@@ -2,6 +2,7 @@ import type { TabInfo } from '@cdp-mcp/shared';
 import { TabNotFoundError, createLogger } from '@cdp-mcp/shared';
 import type { ConnectionPool } from '../cdp/connection-pool.js';
 import type { TargetInfoCdp } from '../cdp/protocol-types.js';
+import { navigate } from '../act/navigate.js';
 
 const logger = createLogger('tab-manager');
 
@@ -43,8 +44,16 @@ export class TabManager {
     return tabs[0];
   }
 
+  /** 내 창에 빈 탭을 열고 그 탭에서 url 이 다 뜰 때까지 기다린 뒤 돌려준다. */
   async createTab(url: string): Promise<TabInfo> {
-    const id = await this.pool.createOwnedTab(url);
+    const id = await this.pool.createOwnedTab('about:blank');
+    if (url !== 'about:blank') {
+      try {
+        await navigate(this.pool, { url });
+      } catch (err) {
+        logger.warn(`createTab: page did not finish loading: ${err}`);
+      }
+    }
     const tab = (await this.listTabs()).find(t => t.id === id);
     if (!tab) throw new TabNotFoundError('Created tab not found');
     return tab;

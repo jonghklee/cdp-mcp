@@ -87,6 +87,9 @@ try {
     A.tool('cdp_create_tab', { url: 'https://example.com/?agent=A' }),
     B.tool('cdp_create_tab', { url: 'https://example.com/?agent=B' }),
   ]);
+  check('새 탭은 다 뜬 뒤에 돌려준다', ta.tab.title === 'Example Domain', `title=${ta.tab.title}`);
+  const aw = await A.tool('cdp_evaluate', { context: 'page', code: 'await new Promise(r => setTimeout(() => r(7), 50))' });
+  check('맨 앞 await 가 된다', JSON.stringify(aw).includes('7'), JSON.stringify(aw).slice(0, 60));
   chromeMainPids().forEach((p) => seenChromePids.add(p));
   check('크롬은 하나만 떴다', chromeMainPids().length === 1, `main pids=${chromeMainPids().length}`);
 

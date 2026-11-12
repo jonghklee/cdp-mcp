@@ -46,6 +46,7 @@ describe('ContextRouter', () => {
         expression: 'document.title',
         returnByValue: true,
         awaitPromise: true,
+        replMode: true,
       });
       expect(result.value).toBe('hello');
       expect(result.type).toBe('string');

@@ -65,6 +65,7 @@ export class ContextRouter {
       expression: code,
       returnByValue,
       awaitPromise,
+      replMode: true,
     });
     return this.formatResult(result);
   }
@@ -99,6 +100,7 @@ export class ContextRouter {
       contextId: world.executionContextId,
       returnByValue,
       awaitPromise,
+      replMode: true,
     });
 
     return this.formatResult(result);
@@ -117,6 +119,7 @@ export class ContextRouter {
       expression: code,
       returnByValue,
       awaitPromise,
+      replMode: true,
     });
     return this.formatResult(result);
   }
@@ -134,6 +137,7 @@ export class ContextRouter {
       expression: code,
       returnByValue,
       awaitPromise,
+      replMode: true,
     });
     return this.formatResult(result);
   }
