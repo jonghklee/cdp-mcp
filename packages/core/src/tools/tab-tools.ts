@@ -9,7 +9,7 @@ export function registerTabTools(
   // cdp_list_tabs
   server.tool(
     'cdp_list_tabs',
-    `열려 있는 모든 브라우저 탭 목록을 반환합니다. 각 탭에는 고유 id가 포함됩니다.
+    `이 에이전트 창에 열린 탭 목록을 반환합니다(다른 에이전트의 탭은 보이지 않습니다). 각 탭에는 고유 id가 포함됩니다.
 
 사용 시점:
 - 현재 열린 탭들을 확인할 때
@@ -64,11 +64,10 @@ export function registerTabTools(
       tabId: z.string().optional().describe('활성화할 탭 ID (cdp_list_tabs에서 반환된 id)'),
       url: z.string().optional().describe('URL 부분 일치로 탭 검색'),
       title: z.string().optional().describe('제목 부분 일치로 탭 검색'),
-      background: z.boolean().optional().describe('기본 true (백그라운드). false로 설정하면 Chrome을 foreground로 올림'),
     },
-    async ({ tabId, url, title, background }) => {
+    async ({ tabId, url, title }) => {
       const { tabManager } = await lazy.ensure();
-      const tab = await tabManager.switchTab({ tabId, url, title, background });
+      const tab = await tabManager.switchTab({ tabId, url, title });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({ switched: true, tab }) }],
       };
@@ -92,77 +91,35 @@ export function registerTabTools(
 - tab: 생성된 탭 정보 {id, url, title}`,
     {
       url: z.string().describe('새 탭에서 열 URL'),
-      background: z.boolean().optional().describe('기본 true (백그라운드). false로 설정하면 Chrome을 foreground로 올림'),
     },
-    async ({ url, background }) => {
+    async ({ url }) => {
       const { tabManager } = await lazy.ensure();
-      const tab = await tabManager.createTab(url, background);
+      const tab = await tabManager.createTab(url);
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({ created: true, tab }) }],
       };
     }
   );
 
-  // cdp_focus_chrome
+  // cdp_show
   server.tool(
-    'cdp_focus_chrome',
-    `Chrome 브라우저를 foreground로 올려 화면에 표시합니다.
+    'cdp_show',
+    `이 에이전트 창의 현재 탭을 사람이 볼 수 있는 주소를 돌려줍니다. 크롬은 창 없이 돌기 때문에 화면에는 아무것도 뜨지 않습니다.
 
 사용 시점:
-- 사용자가 Chrome 화면을 직접 확인해야 할 때
-- 스크린샷 전에 Chrome을 앞으로 가져올 때
+- 사용자가 «띄워줘», «보여줘», «화면 보자»라고 직접 요청했을 때만
 
 반환 값:
-- focused: 성공 여부
-- tab: 활성화된 탭 정보 {id, url, title}`,
-    {
-      tabId: z.string().optional().describe('foreground로 올릴 탭 ID (미지정 시 현재 활성 탭)'),
-    },
-    async ({ tabId }) => {
+- tab: 현재 탭 {id, url, title}
+- viewUrl: 평소 크롬에서 열면 이 탭을 실시간으로 보고 조작할 수 있는 주소`,
+    {},
+    async () => {
       const { tabManager } = await lazy.ensure();
-      let targetTabId = tabId;
-      if (!targetTabId) {
-        const active = await tabManager.getActiveTab();
-        targetTabId = active.id;
-      }
-      await tabManager.activateTab(targetTabId);
-      const tabs = await tabManager.listTabs();
-      const tab = tabs.find(t => t.id === targetTabId);
+      const tab = await tabManager.getActiveTab();
+      const port = lazy.getPort();
+      const viewUrl = `http://127.0.0.1:${port}/devtools/inspector.html?ws=127.0.0.1:${port}/devtools/page/${tab.id}`;
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ focused: true, tab }) }],
-      };
-    }
-  );
-
-  // cdp_hide_chrome
-  server.tool(
-    'cdp_hide_chrome',
-    `Chrome 창을 Dock으로 최소화하여 화면에서 치웁니다. cdp_focus_chrome의 반대 동작.
-
-사용 시점:
-- 자동화 중 Chrome 창이 사용자의 화면을 가리지 않게 할 때
-- 사용자가 "크롬 숨겨/치워"라고 요청할 때
-
-주의:
-- 최소화 상태에서도 스크린샷·클릭·입력 등 모든 자동화는 정상 동작합니다 (viewport 자동 보정)
-- 다시 표시하려면 cdp_focus_chrome을 호출하세요
-
-반환 값:
-- hidden: 성공 여부
-- tabId: 최소화된 창의 탭 ID`,
-    {
-      tabId: z.string().optional().describe('최소화할 창의 탭 ID (미지정 시 현재 활성 탭의 창)'),
-    },
-    async ({ tabId }) => {
-      const { tabManager } = await lazy.ensure();
-      let targetTabId = tabId;
-      if (!targetTabId) {
-        const active = await tabManager.getActiveTab();
-        targetTabId = active.id;
-      }
-      await tabManager.minimizeWindow(targetTabId);
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ hidden: true, tabId: targetTabId }) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({ tab, viewUrl }) }],
       };
     }
   );

@@ -56,12 +56,12 @@ export type {
 } from './observe/network-intercept.js';
 
 // Infra
-export { ChromeManager } from './infra/chrome-pool.js';
-export type { ChromeLaunchOptions } from './infra/chrome-pool.js';
+export {
+  acquireSharedChrome, releaseSharedChrome, restartSharedChrome, syncCookies, copyProfile, isChromeUp, SHARED_PORT,
+} from './infra/shared-chrome.js';
 export { TabManager } from './infra/tab-manager.js';
 export { ExtensionManager } from './infra/extension-manager.js';
 export type { ExtensionInfo } from './infra/extension-manager.js';
-export { PortManager } from './infra/port-manager.js';
 
 // Tools (MCP registration)
 export { registerActTools } from './tools/act-tools.js';

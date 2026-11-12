@@ -12,14 +12,14 @@ Layer 1  → 순수 브라우저 제어 (범용)
 
 의존: QA → 3 → 2 → 1. pnpm monorepo, TypeScript strict.
 
-## 포트 규칙 (중요)
+## 공유 크롬 규칙 (중요)
 
-- cdp-mcp 전용 포트 범위: **9250~9278** (env `CDP_MCP_PORT=9250`)
-- chrome-devtools 등 다른 CDP MCP는 9222 사용 → 절대 겹치지 않음
-- cdp-mcp는 자기 lock이 있는 Chrome에만 재연결, 남의 Chrome에 연결 금지
-- 포트 변경 시 `.mcp.json`의 `CDP_MCP_PORT` 환경변수 수정
-- **cdp_reconnect로 포트 지정 시**: 반드시 confirm 없이 먼저 호출 → 탭 목록/lock 정보를 사용자에게 보여주고 확답 받은 후 confirm=true로 재호출
-- **Chrome 프로세스 강제 종료 금지**: cdp-mcp는 절대로 Chrome을 kill하지 않음. 연결만 끊고 lock만 해제. Chrome 종료는 사용자가 직접 수행
+- 모든 cdp-mcp 서버(에이전트)가 **창 없는 크롬 하나**를 같이 쓴다. 포트 9227 고정(env `CDP_MCP_PORT`), 데이터 폴더 `~/.cdp-mcp/chrome-profiles/shared`.
+- 에이전트마다 창 하나. 탭 목록·전환·닫기·현재 탭은 자기 창(과 자기 탭이 연 팝업)만 본다.
+- 크롬을 화면 앞으로 올리는 도구·옵션은 없다. 사람에게 보여 줄 때는 `cdp_show` 가 주소만 돌려준다.
+- 켤 때마다 평소 크롬 프로필에서 Preferences·Secure Preferences·Cookies·Login Data·Local Storage 만 복사한다. 실행 중에는 바뀐 쿠키만 가져온다(`cdp_sync_profile`).
+- 마지막 에이전트가 끝나면 크롬을 끄고 복사본을 지운다. lease 는 `~/.cdp-mcp/leases/<pid>.json`.
+- 종단 시험: `node scripts/e2e-shared-chrome.mjs` (시험 전용 포트·폴더, 화면 맨 앞 노출 0회 확인 포함).
 
 ## 핵심 규칙
 
@@ -50,5 +50,4 @@ Layer 1  → 순수 브라우저 제어 (범용)
 
 ## 현재 상태
 
-Phase: 1 (Core 기반)
-진행: 시작 전
+공유 창 없는 크롬 구조 (2026-11-12)

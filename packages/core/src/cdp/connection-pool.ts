@@ -2,8 +2,7 @@ import { EventEmitter } from 'events';
 import { CdpClient } from './cdp-client.js';
 import { CdpSession } from './cdp-session.js';
 import { CdpConnectionError, TabNotFoundError, ExtensionNotFoundError, createLogger } from '@cdp-mcp/shared';
-import type { TargetInfoHttp } from './protocol-types.js';
-import { isSessionInfoTab } from '../infra/session-info-tab.js';
+import type { TargetInfoCdp, TargetInfoHttp } from './protocol-types.js';
 
 const logger = createLogger('connection-pool');
 
@@ -40,7 +39,16 @@ export class ConnectionPool extends EventEmitter {
         this.connections.delete(params.targetId);
         logger.info(`Target destroyed, connection closed: ${params.targetId}`);
       }
+      this.owned.delete(params.targetId);
+      this.windowOfTarget.delete(params.targetId);
+      if (this.activeId === params.targetId) this.activeId = null;
       this.emit('targetDestroyed', params.targetId);
+    });
+
+    // 내 탭이 연 팝업(홈택스 인증서 안내창 등)은 다른 창에 떠도 내 것이다.
+    this.browserClient.on('Target.targetCreated', (params: { targetInfo: TargetInfoCdp }) => {
+      const t = params.targetInfo;
+      if (t.type === 'page' && t.openerId && this.owned.has(t.openerId)) this.owned.add(t.targetId);
     });
 
     await this.browserClient.send('Target.setDiscoverTargets', { discover: true });
@@ -48,11 +56,143 @@ export class ConnectionPool extends EventEmitter {
     logger.info('Browser connected, target discovery enabled');
   }
 
+  /* ── 에이전트별 창 ────────────────────────────────────────────
+   * 크롬 하나를 여러 에이전트가 같이 쓴다. 에이전트(= 이 서버 프로세스)마다 창을 하나 만들고,
+   * 그 창의 탭과 그 탭이 연 팝업만 «내 탭»으로 본다. 다른 에이전트의 탭은 목록에도 안 나온다.
+   * 창 맨 앞의 빈 탭(home)은 새 탭을 내 창 안에 여는 데만 쓰고 목록에서는 뺀다.
+   */
+  private windowId: number | null = null;
+  private homeId: string | null = null;
+  private activeId: string | null = null;
+  private readonly owned = new Set<string>();
+  private readonly windowOfTarget = new Map<string, number>();
+
+  getWindowId(): number | null {
+    return this.windowId;
+  }
+
+  async initWindow(): Promise<number> {
+    const browser = this.getBrowserClient();
+    const { targetId } = await browser.send<{ targetId: string }>('Target.createTarget', {
+      url: 'about:blank', newWindow: true, background: true, width: 1400, height: 1000,
+    });
+    this.homeId = targetId;
+    const windowId = await this.windowOf(targetId);
+    if (windowId === undefined) throw new CdpConnectionError('Could not resolve own window id');
+    this.windowId = windowId;
+    this.activeId = null;
+    logger.info(`Own window ${windowId} (home ${targetId})`);
+    return windowId;
+  }
+
+  private async windowOf(targetId: string): Promise<number | undefined> {
+    const cached = this.windowOfTarget.get(targetId);
+    if (cached !== undefined) return cached;
+    try {
+      const { windowId } = await this.getBrowserClient().send<{ windowId: number }>('Browser.getWindowForTarget', { targetId });
+      this.windowOfTarget.set(targetId, windowId);
+      return windowId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 내 탭 id 목록. 현재 탭이 맨 앞이다. */
+  async ownedPageIds(): Promise<string[]> {
+    const { targetInfos } = await this.getBrowserClient().send<{ targetInfos: TargetInfoCdp[] }>('Target.getTargets', {});
+    const pages = targetInfos.filter(t => t.type === 'page' && t.targetId !== this.homeId);
+    const ids: string[] = [];
+    for (const p of pages) {
+      if (!this.owned.has(p.targetId) && this.windowId !== null && (await this.windowOf(p.targetId)) === this.windowId) {
+        this.owned.add(p.targetId);
+      }
+      if (this.owned.has(p.targetId)) ids.push(p.targetId);
+    }
+    if (this.activeId && ids.includes(this.activeId)) {
+      return [this.activeId, ...ids.filter(id => id !== this.activeId)];
+    }
+    return ids;
+  }
+
+  isOwned(targetId: string): boolean {
+    return this.owned.has(targetId);
+  }
+
+  setActive(targetId: string): void {
+    if (!this.owned.has(targetId)) throw new TabNotFoundError(`내 창의 탭이 아닙니다: ${targetId}`);
+    this.activeId = targetId;
+  }
+
+  /** 내 창 안에 새 탭을 연다. 창이 없어졌으면 창부터 다시 만든다. */
+  async createOwnedTab(url: string): Promise<string> {
+    const browser = this.getBrowserClient();
+    const home = this.homeId ? (await this.listAllTargets()).find(t => t.id === this.homeId) : undefined;
+    if (!home) await this.initWindow();
+
+    const before = new Set((await this.listAllTargets()).filter(t => t.type === 'page').map(t => t.id));
+    const homeSession = await this.getConnection(this.homeId!);
+    await homeSession.send('Runtime.evaluate', {
+      expression: `void window.open(${JSON.stringify(url)}, '_blank', 'noopener')`,
+      userGesture: true,
+    });
+
+    for (let i = 0; i < 50; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      const fresh = (await this.listAllTargets()).filter(t => t.type === 'page' && !before.has(t.id));
+      for (const t of fresh) {
+        if ((await this.windowOf(t.id)) === this.windowId) {
+          this.owned.add(t.id);
+          this.activeId = t.id;
+          return t.id;
+        }
+      }
+    }
+
+    // window.open 이 막힌 경우: 새 창으로라도 연다(그 창도 내 것으로 기록).
+    logger.warn('window.open from home tab did not produce a tab, falling back to a new window');
+    const { targetId } = await browser.send<{ targetId: string }>('Target.createTarget', {
+      url, newWindow: true, background: true, width: 1400, height: 1000,
+    });
+    this.owned.add(targetId);
+    this.activeId = targetId;
+    return targetId;
+  }
+
+  /** 서버가 끝날 때 내 창과 내 팝업을 닫는다. */
+  async closeOwnWindow(): Promise<void> {
+    const browser = this.getBrowserClient();
+    const ids = [...(await this.ownedPageIds()), ...(this.homeId ? [this.homeId] : [])];
+    for (const id of ids) {
+      await browser.send('Target.closeTarget', { targetId: id }).catch(() => {});
+    }
+  }
+
+  /** 죽은 에이전트가 남긴 창을 닫는다. */
+  async closeWindowById(windowId: number): Promise<number> {
+    const browser = this.getBrowserClient();
+    const { targetInfos } = await browser.send<{ targetInfos: TargetInfoCdp[] }>('Target.getTargets', {});
+    let closed = 0;
+    for (const t of targetInfos.filter(x => x.type === 'page')) {
+      if ((await this.windowOf(t.targetId)) === windowId) {
+        await browser.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {});
+        closed++;
+      }
+    }
+    return closed;
+  }
+
+  private async listAllTargets(): Promise<TargetInfoHttp[]> {
+    return CdpClient.listTargets(this.port);
+  }
+
   /**
-   * HTTP /json 으로 target 목록 조회 (tool layer에서 targetId 확인용).
+   * HTTP /json 으로 target 목록 조회. 페이지는 내 탭만(현재 탭이 맨 앞), 서비스 워커 등은 그대로.
    */
   async listTargets(): Promise<TargetInfoHttp[]> {
-    return CdpClient.listTargets(this.port);
+    const all = await this.listAllTargets();
+    const mine = await this.ownedPageIds();
+    const pages = mine.map(id => all.find(t => t.id === id)).filter((t): t is TargetInfoHttp => !!t);
+    return [...pages, ...all.filter(t => t.type !== 'page')];
   }
 
   getBrowserClient(): CdpClient {
@@ -106,42 +246,10 @@ export class ConnectionPool extends EventEmitter {
    * 활성 페이지 타겟 찾기 (HTTP /json 기반).
    */
   async getActiveTab(): Promise<CdpSession> {
-    const targets = await CdpClient.listTargets(this.port);
-
-    const allPages = targets.filter(t => t.type === 'page');
-    if (allPages.length === 0) {
-      throw new TabNotFoundError('No page targets found');
-    }
-
-    // 일반 웹 페이지 우선 (chrome://, chrome-extension://, 세션 정보 탭 제외)
-    const regularPages = allPages.filter(
-      t => !t.url.startsWith('chrome://') && !t.url.startsWith('chrome-extension://') && !isSessionInfoTab(t.url)
-    );
-
-    // Fallback: 세션 정보 탭 제외한 모든 페이지
-    const nonSessionPages = allPages.filter(t => !isSessionInfoTab(t.url));
-
-    const target = regularPages.length > 0
-      ? regularPages[0]
-      : nonSessionPages.length > 0
-        ? nonSessionPages[0]
-        : allPages[0]; // Last resort: session info tab
-
-    // getConnection 호출, 실패 시 다음 타겟으로 fallback
-    try {
-      return await this.getConnection(target.id);
-    } catch (err) {
-      // fallback: 다른 페이지 시도
-      const remaining = allPages.filter(t => t.id !== target.id);
-      for (const fallback of remaining) {
-        try {
-          return await this.getConnection(fallback.id);
-        } catch {
-          // continue
-        }
-      }
-      throw err;
-    }
+    const mine = await this.ownedPageIds();
+    const id = mine[0] ?? (await this.createOwnedTab('about:blank'));
+    this.activeId = id;
+    return this.getConnection(id);
   }
 
   /**

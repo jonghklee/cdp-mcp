@@ -196,63 +196,6 @@ describe('ConnectionPool', () => {
     });
   });
 
-  describe('getActiveTab()', () => {
-    it('should return a CdpSession for a page target', async () => {
-      await pool.connectBrowser();
-
-      const pageTarget = makeHttpTarget({ id: 'page-1', url: 'https://example.com' });
-      vi.mocked(CdpClient.listTargets).mockResolvedValue([pageTarget]);
-
-      const session = await pool.getActiveTab();
-      expect(session).toBeInstanceOf(CdpSession);
-      expect(session.connected).toBe(true);
-    });
-
-    it('should prefer non-chrome:// pages', async () => {
-      await pool.connectBrowser();
-
-      const chromeTarget = makeHttpTarget({ id: 'chrome-1', url: 'chrome://extensions' });
-      const normalTarget = makeHttpTarget({ id: 'page-1', url: 'https://example.com' });
-      vi.mocked(CdpClient.listTargets).mockResolvedValue([chromeTarget, normalTarget]);
-
-      await pool.getActiveTab();
-
-      // The per-target client should connect to the normal page's WS URL
-      const targetClient = mockClientInstances[1];
-      expect(targetClient.wsUrl).toBe('ws://127.0.0.1:9222/devtools/page/page-1');
-    });
-
-    it('should fall back to chrome:// page when no regular pages exist', async () => {
-      await pool.connectBrowser();
-
-      const chromeTarget = makeHttpTarget({ id: 'chrome-1', url: 'chrome://newtab' });
-      vi.mocked(CdpClient.listTargets).mockResolvedValue([chromeTarget]);
-
-      const session = await pool.getActiveTab();
-      expect(session).toBeInstanceOf(CdpSession);
-    });
-
-    it('should throw TabNotFoundError when no page targets exist', async () => {
-      await pool.connectBrowser();
-
-      const workerTarget = makeHttpTarget({
-        id: 'worker-1',
-        type: 'service_worker',
-        url: 'chrome-extension://abc/sw.js',
-      });
-      vi.mocked(CdpClient.listTargets).mockResolvedValue([workerTarget]);
-
-      await expect(pool.getActiveTab()).rejects.toThrow(TabNotFoundError);
-    });
-
-    it('should throw TabNotFoundError when no targets at all', async () => {
-      await pool.connectBrowser();
-
-      vi.mocked(CdpClient.listTargets).mockResolvedValue([]);
-
-      await expect(pool.getActiveTab()).rejects.toThrow(TabNotFoundError);
-    });
-  });
 
   describe('getExtensionWorker()', () => {
     it('should find service_worker by extensionId', async () => {
